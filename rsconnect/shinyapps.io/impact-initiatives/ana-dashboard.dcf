@@ -5,7 +5,7 @@ account: impact-initiatives
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 15652437
-bundleId:
+bundleId: 11257983
 url: https://impact-initiatives.shinyapps.io/ana-dashboard/
 version: 1
 asMultiple: FALSE

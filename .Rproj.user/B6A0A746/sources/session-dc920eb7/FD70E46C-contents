@@ -2843,10 +2843,6 @@ output$ana_preview <- DT::renderDataTable({
 })
 
 
-observeEvent(input$goToDownload, {
-  updateTabsetPanel(session, "navbarPage", selected = "datadown")
-})
-
 
 }
   
