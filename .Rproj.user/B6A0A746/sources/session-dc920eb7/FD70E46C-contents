@@ -169,8 +169,7 @@ n_drivers <- length(main_driver_levels)
 
 driver_palette <- if (n_drivers <= 9) {
   c(
-    "#D73027", "#FC8D59", "#FEE08B", "#D9EF8B",
-    "#91CF60", "#1A9850", "#4575B4", "#313695", "#542788"
+    "#99000d", "#1A9850", "#FEE08B", "#D73027", "#542788", "#4575B4", "#313695", "#542788"
   )[seq_len(n_drivers)]
 } else {
   turbo(n_drivers)
@@ -854,7 +853,7 @@ input:checked + .slider:before {
             
             div(
               class = "help",
-              "Type/Select the locality you want to highlight:",
+              "Type/Select the locality you want to display additional information for:",
               style = "font-size:11px; margin-top:0; margin-bottom:2px;"
             ),
             
@@ -1003,8 +1002,12 @@ input:checked + .slider:before {
           tags$br(),
           downloadButton(
             outputId = "download_locality_data",
-            label = "Download Locality Data"
+            label = "Download Locality Data",
+            style = "
+    border-radius: 25px;
+    padding: 10px 20px;"
           )
+          
           
         ),
         
@@ -1394,7 +1397,7 @@ div(
            )
   )
   ),
-
+############################ CONTEXT MAPS ###################################
 tabPanel(
   "Context Maps",
   div(
@@ -1451,7 +1454,14 @@ tabPanel(
               ),
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
-                img(src = "areainfluence.png", style = "width: 80%; height: auto;")
+                img(src = "areainfluence.png", style = "width: 80%; height: auto;"),
+
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("Liveuamap", href = "https://sudan.liveuamap.com/", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1474,6 +1484,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "dtm.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("IOM - DTM", href = "https://dtm.iom.int/sites/g/files/tmzbdl1461/files/reports/DTM%20Sudan%20Mobility%20Update%2022_0.pdf", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1495,6 +1511,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "refugee.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("UNHCR", href = "https://data.unhcr.org/en/documents/details/119860", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1516,7 +1538,13 @@ tabPanel(
               ),
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
-                img(src = "returnee.png", style = "width: 80%; height: auto;")
+                img(src = "returnee2.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("UNHCR", href = "https://reliefweb.int/map/south-sudan/south-sudan-refugees-returnees-and-idp-map-31-october-2025", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1539,6 +1567,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "protection.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("UNHCR", href = "https://reliefweb.int/report/sudan/protection-hotspots-sudan-31-august-2025", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1560,6 +1594,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "accessmap.png", style = "width: 80%; height: 80%;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("UN OCHA", href = "https://www.unocha.org/publications/report/sudan/sudan-humanitarian-access-snapshot-august-2025", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
           ),
@@ -1582,8 +1622,15 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "ipc.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("IPC", href = "https://www.ipcinfo.org/fileadmin/user_upload/ipcinfo/docs/IPC_Sudan_Acute_Food_Insecurity_Sep2025_May2026_Special_Snapshot.pdf", target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
             )
+
           ),
           tags$hr(style = "border-color: #e6f2ff; border-width: 3px;
                            width: 90%; border-radius: 10px;
@@ -1600,10 +1647,17 @@ tabPanel(
               div(
                 class = "title",
                 tags$h3(tags$b("Food System Evaluation (REACH) - September 2025"))
-              ),
+              ),     
+              
               div(
                 style = "display: flex; justify-content: center; gap: 20px; padding-top: 20px;",
                 img(src = "food.png", style = "width: 70%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: REACH (consult `Data Download`)"
+                
               )
             )
           ),
@@ -1626,7 +1680,15 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "healthinfrastructure.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: ",
+                a("HeRAMS", href = "https://www.who.int/publications/m/item/herams-sudan-baseline-report-2025-operational-status-of-the-health-system",
+                  target = "_blank", style = "margin-left: 5px; margin-top: 20px")
               )
+              
             )
           ),
           tags$hr(style = "border-color: #e6f2ff; border-width: 3px;
@@ -1648,6 +1710,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "healthsyst.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: REACH (consult `Data Download`)"
+
               )
             )
           ),
@@ -1669,6 +1737,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "houtcomes.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: REACH (consult `Data Download`)"
+                
               )
             )
           ),
@@ -1690,6 +1764,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "water.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: REACH (consult `Data Download`)"
+                
               )
             )
           ),
@@ -1711,6 +1791,12 @@ tabPanel(
               div(
                 style = "display: flex; justify-content: center; padding-top: 20px;",
                 img(src = "living.png", style = "width: 80%; height: auto;")
+              ),
+              br(),
+              div(
+                style = "font-size: 85%; color: #666; text-align: center;",
+                "Source: REACH (consult `Data Download`)"
+                
               )
             )
           ),
@@ -1730,6 +1816,7 @@ tabPanel(
   ############################ DATA DOWNLOAD ###################################
   tabPanel(
     "Data Download",
+    value = "data_download",
     div( 
       class = "content-wrapper",
       style = "margin-top: 70px;",
@@ -2754,6 +2841,13 @@ output$ana_preview <- DT::renderDataTable({
     class = "stripe hover compact"
   )
 })
+
+
+observeEvent(input$goToDownload, {
+  updateTabsetPanel(session, "navbarPage", selected = "datadown")
+})
+
+
 }
   
 
