@@ -1,0 +1,15 @@
+
+# Horizontal line between header and content
+tags$hr(style = "margin:6px 0 6px 0;"),
+
+# Scrollable content section (with defined height and overflow)
+div(
+  style = "flex-grow: 1; overflow-y: auto; padding-bottom: 10px; height: calc(100vh - 300px);",  # Scrollable area for content, fixed height
+  
+  h6("Map Description", style = "font-weight: bold; margin-bottom: 15px;"),  # Title for the header
+  
+  uiOutput("map_type_text")
+  
+  # Interactive Inputs (moved here from the header section)
+  
+)

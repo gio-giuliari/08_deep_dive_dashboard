@@ -1,0 +1,399 @@
+# Clear environment
+remove(list = ls())
+
+# Load libraries
+library(pacman)
+p_load(tidyverse, dplyr, here, lubridate, janitor, httr, 
+       ggrepel, jsonlite, openxlsx, readxl, skimr, factoextra, 
+       fuzzyjoin, zoo, ggcorrplot, miceadds, ripc, ggrepel, naniar,
+       ggplot2, missMDA, FactoMineR, factoextra, sf,ClustGeo, sfdep,lwgeom)
+
+################################################################################
+######################### 1. DATA UPLOAD ######################################
+################################################################################
+
+pcodes <- read_excel("01_input/02_Geographic_Datasets/sudan_pcodes.xlsx")
+ana <- read_excel("03_output/01_ANA_consolidated_data/02_ANA_full_data_wide.xlsx")
+indicator <- read_excel("01_input/ANA_Base_File.xlsx", sheet="REF Indicators_ANA") %>%
+  select(`Indicator ID`,`Metric` )
+adm2 <- st_read("01_input/02_Geographic_Datasets/Admin2/SDN_Admin2.shp", quiet = TRUE) %>%
+  st_make_valid()
+conflict_data<- read.csv("01_input/01_Source_Datasets/ACLED_Conflict_Data.csv") %>%
+  select(admin1, admin2, civilian_targeting, event_type, fatalities,inter1)
+liv_zones  <- st_read("01_input/02_Geographic_Datasets/Livelihood_zones/SD_LHZ_2014.shp", quiet = TRUE)
+flags <- read_xlsx("03_output/02_ANA_Flagging_Analysis/03_ANA_Flagging_Analysis.xlsx")
+
+
+################################################################################
+###################### 2. DATA SET UP AND RENAMING ############################
+################################################################################
+
+
+######################################################### MOST PROMINENT LV ZONE
+
+adm2 <- adm2 |> filter(!st_is_empty(geometry))
+liv_zones <- liv_zones |> filter(!st_is_empty(geometry))
+
+# Reproject to equal-area CRS (so area units are reliable)
+eqarea_crs <- 6933
+adm2_proj <- st_transform(adm2, eqarea_crs)
+lz_proj   <- st_transform(liv_zones, eqarea_crs)
+
+# Clean geometries (validity / tiny slivers)
+clean <- function(x, tol = 1) {
+  x <- st_make_valid(x)
+  x <- st_set_precision(x, tol) |> st_snap_to_grid(tol)
+  x <- st_make_valid(x)
+  x <- suppressWarnings(st_buffer(x, 0))
+  x <- st_collection_extract(x, "POLYGON")
+  x
+}
+
+adm2_clean <- clean(adm2_proj)
+lz_clean   <- clean(lz_proj)
+
+# Intersection
+intersection <- st_intersection(
+  adm2_clean |> select(ADM2_EN),
+  lz_clean   |> select(LZNAMEEN)
+)
+
+# Compute areas
+intersection <- intersection |>
+  mutate(area_m2 = as.numeric(st_area(geometry)),
+         area_km2 = area_m2 / 1e6)
+
+# For each ADM2, pick the livelihood zone with the largest overlapping area
+winners <- intersection |>
+  st_drop_geometry() |>
+  group_by(ADM2_EN, LZNAMEEN) |>
+  summarise(area_km2 = sum(area_km2, na.rm = TRUE), .groups = "drop_last") |>
+  slice_max(area_km2, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  rename(dominant_livzone = LZNAMEEN,
+         dominant_livzone_area_km2 = area_km2) %>%
+  mutate(ADM2_EN= ifelse(ADM2_EN=="Ar Rahad", "Ar Rahad - Gf", ADM2_EN)) %>%
+  full_join(pcodes) %>%
+  mutate(dominant_livzone= ifelse(ADM2_PCODE=="SD13030", "Western Agropastoral Millet",dominant_livzone)) %>%
+  select(ADM2_PCODE, dominant_livzone)
+
+
+
+############################################################### CONFLICT DATA
+
+
+summary_ev <- conflict_data %>%
+  # count by admin + event_type + actor1
+  mutate(inter1 = replace_na(inter1, "(Missing)")) %>%
+  group_by(admin1, admin2, event_type, inter1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  # wide matrix: one column per (event_type, actor1) combo
+  pivot_wider(
+    names_from  = c(event_type, inter1),
+    values_from = n,
+    values_fill = 0,
+    names_sep   = "__"         # e.g., "Battles__RSF"
+    # names_glue = "{event_type}__{actor1}" # (optional custom naming)
+  ) %>%
+  
+  # add totals (fatalities, civilian targeting)
+  left_join(
+    conflict_data %>%
+      group_by(admin1, admin2) %>%
+      summarise(
+        fatalities_sum = sum(as.numeric(fatalities), na.rm = TRUE),
+        civilian_targeting_n = sum(!is.na(civilian_targeting)),
+        .groups = "drop"
+      ),
+    by = c("admin1", "admin2")
+  ) %>%
+  
+  janitor::clean_names() %>%
+  
+  # harmonise admin2 names
+  mutate(
+    admin2 = case_when(
+      admin2 == "Bau" ~ "Baw",
+      admin1 == "Blue Nile"        & admin2 == "Al Tadamon" ~ "At Tadamon - BN",
+      admin1 == "South Kordofan"   & admin2 == "Al Tadamon" ~ "At Tadamon - SK",
+      admin2 == "Ad Duayn" ~ "Ad Du'ayn",
+      admin2 == "Shiaria" ~ "Shia'ria",
+      admin2 == "Omdurman" ~ "Um Durman",
+      admin2 == "Ar Rahad" ~ "Ar Rahad - NK",
+      admin2 == "Rashad" ~ "Ar Rashad",
+      admin2 == "Merowe" ~ "Merwoe",
+      admin2 == "Halaib" ~ "Hala'ib",
+      admin2 == "Jubayt Elmaaadin" ~ "Jubayt Elma'aadin",
+      admin1 == "South Darfur"   & admin2 == "El Salam"   ~ "As Salam - SD",
+      admin1 == "South Kordofan" & admin2 == "Habila"     ~ "Habila - SK",
+      admin2 == "El Geneina" ~ "Ag Geneina",
+      admin1 == "West Darfur"   & admin2 == "Habila"      ~ "Habila - WD",
+      admin1 == "West Kordofan" & admin2 == "El Salam"    ~ "As Salam - WK",
+      TRUE ~ admin2
+    )
+  ) %>%
+  
+  # join to pcodes
+  left_join(
+    pcodes %>% select(ADM1_EN, ADM2_EN, ADM2_PCODE),
+    by = join_by("admin2" == "ADM2_EN")
+  ) %>%
+  
+  select(-c(admin1, admin2, ADM1_EN)) %>%
+  relocate(ADM2_PCODE) %>%
+  # prefix all feature columns with "acl_"
+  rename_with(~ paste0("acl_", .x), -ADM2_PCODE)
+
+
+############################################################### CONFLICT DATA
+
+#  Rename columns using indicator dataset
+rename_map <- setNames(indicator$Metric, indicator$`Indicator ID`)
+
+ana_rename <- ana %>%
+  rename_with(~ ifelse(.x %in% names(rename_map), rename_map[.x], .x)) %>%
+  rename(ADM2_PCODE=adm2_pcode)
+
+#  Filter variables and keep ADM2 names
+ana_filtered <- ana_rename %>%
+  select(where(~ mean(!is.na(.)) >= 0.6)) %>%
+  select(-c("% of HH with access to unimproved sanitation facilities", 
+            "% of assessed settlements reporting most people need more than 30min to get to the main water source, collect water, and return"))
+
+############################################################### CONSOLIDATE DATA
+
+
+# join keys with summary_ev
+keys_ev <- intersect(names(ana_filtered), names(summary_ev))
+
+merged_base <- ana_filtered %>%
+  left_join(winners) %>%
+  left_join(summary_ev, by = keys_ev) %>%
+  group_by(ADM2_PCODE)%>%
+  slice(1) %>%
+  ungroup()
+
+# columns that came from summary_ev (excluding the keys)
+sum_cols <- setdiff(names(summary_ev), keys_ev)
+sum_cols <- intersect(sum_cols, names(merged_base))  # keep only those present
+
+# fill NAs from summary_ev columns with 0
+adm2_sf <- adm2 %>%
+  left_join(merged_base)%>%
+  mutate(across(all_of(sum_cols), ~ replace_na(.x, 0))) %>%
+  filter(ADM2_PCODE!="SD19001")
+  
+
+# write.xlsx(merged_data,"03_output/04_ANA_Clustering_Analysis/02_ANA_n30_GeoClustering/merged.xlsx")
+
+################################################################################
+############################# 3. GEO CLUSTERING ################################
+################################################################################
+
+
+# 0) Sanity check: do we actually have attributes?
+ncol(adm2_sf)
+names(adm2_sf)
+
+sf::sf_use_s2(FALSE)
+
+# inputs 
+
+# adm2_sf: sf with ADM2_PCODE (unique id), attributes (incl. %, acl_, dominant_livzone), geometry
+id_col <- "ADM2_PCODE"
+crs_m  <- 6933
+crs_o  <- st_crs(adm2_sf)
+
+###################################################
+################# 3.1 GEOMETRY FIX ################
+###################################################
+
+attrs <- adm2_sf %>% st_drop_geometry()
+
+adm2_geom_m <- adm2_sf %>%
+  select(all_of(id_col), geometry) %>%
+  filter(!st_is_empty(geometry)) %>%
+  st_transform(crs_m)
+
+fix_geom_m <- function(x, tol = 1){
+  x <- st_make_valid(x)
+  x <- st_set_precision(x, tol) |> st_snap_to_grid(tol)
+  x <- suppressWarnings(st_buffer(x, 0))
+  st_collection_extract(x, "POLYGON")
+}
+
+adm2_fix_m <- fix_geom_m(adm2_geom_m, tol = 1) %>%
+  group_by(.data[[id_col]]) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+adm2_full_m <- adm2_fix_m %>%
+  left_join(attrs, by = id_col) %>%
+  arrange(.data[[id_col]])
+
+###################################################
+########### 3.3 CLUSTERING SETUP ##################
+###################################################
+
+nb <- st_contiguity(adm2_full_m)
+lw <- st_weights(nb, style = "W")
+
+ctr <- st_centroid(adm2_full_m)
+geo_dist01 <- {
+  d <- as.matrix(st_distance(ctr))
+  (d - min(d)) / (max(d) - min(d))
+}
+D1 <- as.dist(geo_dist01)
+
+# feature selection 
+df <- adm2_full_m %>% st_drop_geometry()
+
+perc_cols <- names(dplyr::select(df, dplyr::starts_with("%"), dplyr::starts_with("#")))
+acl_cols  <- names(dplyr::select(df, dplyr::starts_with("acl_")))
+cat_cols  <- intersect("dominant_livzone", names(df))
+
+###################################################
+########### 3.3 SPATIAL INPUTATION ################
+###################################################
+
+impute_num_spatial <- function(v){
+  out <- v
+  for(i in seq_along(v)){
+    if(is.na(v[i])){
+      nb_idx <- nb[[i]]
+      if(length(nb_idx)){
+        w  <- lw[[i]]
+        nv <- v[nb_idx]
+        ww <- w[!is.na(nv)]
+        nv <- nv[!is.na(nv)]
+        out[i] <- if(length(nv)) sum(nv*ww)/sum(ww) else stats::median(v, na.rm = TRUE)
+      } else {
+        out[i] <- stats::median(v, na.rm = TRUE)
+      }
+    }
+  }
+  out
+}
+
+dat_imp <- adm2_full_m
+if (length(perc_cols)) {
+  for (cn in perc_cols) dat_imp[[cn]] <- impute_num_spatial(dat_imp[[cn]])
+}
+
+# build numeric features matrix (scale); ONLY % and acl
+to_numeric <- function(x){
+  if (is.numeric(x)) return(x)
+  if (is.integer(x) || is.logical(x)) return(as.numeric(x))
+  if (is.factor(x)  || is.character(x)) return(suppressWarnings(as.numeric(x)))
+  x
+}
+
+num_keep <- c(perc_cols, acl_cols)
+num_df <- dat_imp %>%
+  st_drop_geometry() %>%
+  select(all_of(num_keep)) %>%
+  mutate(across(everything(), to_numeric))
+
+# drop zero-variance and all-NA
+nzv <- vapply(num_df, function(x) sum(!is.na(x)) > 1 && stats::var(x, na.rm = TRUE) > 0, logical(1))
+num_df <- num_df[, nzv, drop = FALSE]
+
+# scale (assumes acl_ columns are already complete; only % were imputed)
+X_num <- if (ncol(num_df)) scale(as.matrix(num_df)) else NULL
+
+# categorical (no imputation)
+X_cat <- if (length(cat_cols)) {
+  cat_df <- dat_imp %>% st_drop_geometry() %>% select(all_of(cat_cols)) %>% mutate(across(everything(), ~ as.factor(.)))
+  model.matrix(~ . - 1, data = cat_df)
+} else NULL
+
+# combine features
+X <- if (!is.null(X_num) && !is.null(X_cat)) cbind(X_num, X_cat) else (X_num %||% X_cat)
+if (is.null(X)) stop("No usable features: check that columns starting with '%' and/or 'acl_' exist.")
+
+###################################################
+####### 3.4 CLUSTERING W/ GEO PENALTY #############
+###################################################
+
+D0 <- dist(X)
+alpha <- 0.4  # tune or use choicealpha(D0, D1, seq(0,1,0.1), K = 25)
+
+tree <- hclustgeo(D0, D1, alpha = alpha)
+dat_imp$clust20 <- factor(cutree(tree, k = 20))
+dat_imp$clust30 <- factor(cutree(tree, k = 30))
+
+
+###################################################
+################# 3.5 OUTPUTS #####################
+###################################################
+
+adm2_clusters <- st_transform(dat_imp, crs_o)
+
+cluster_var <- "clust20"
+
+p20 <- ggplot(adm2_clusters) +
+  geom_sf(aes(fill = .data[[cluster_var]]), color = "white", size = 0.1) +
+  guides(fill = guide_legend(title = "Cluster")) +
+  labs(title = "Sudan — ADM2 Clusters") +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank()
+  )
+
+cluster_var <- "clust30"
+
+p30 <-ggplot(adm2_clusters) +
+  geom_sf(aes(fill = .data[[cluster_var]]), color = "white", size = 0.1) +
+  guides(fill = guide_legend(title = "Cluster")) +
+  labs(title = "Sudan — ADM2 Clusters") +
+  theme_minimal() +
+  theme(
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank()
+  )
+
+ggsave("03_output/04_ANA_Clustering_Analysis/02_adm2_clusters_k20.png", plot = p20, width = 10, height = 8, dpi = 300)
+ggsave("03_output/04_ANA_Clustering_Analysis/03_adm2_clusters_k30.png", plot = p30, width = 10, height = 8, dpi = 300)
+
+###################################################
+
+dat_imp_merge <- dat_imp %>%
+  dplyr::select(ADM2_EN, ADM2_PCODE, ADM1_EN, ADM1_PCODE, clust30, clust20) %>%
+  st_drop_geometry() %>%  
+  left_join(flags, by = c("ADM2_PCODE" = "Unit of Analysis")) %>%
+  select(-"Unit of Analysis Label") %>%
+  arrange(clust30)
+
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "Clustering")
+
+writeData(wb, sheet = 1, dat_imp_merge)
+
+header_style <- createStyle(
+  textDecoration = "bold", 
+  halign = "center",       
+  valign = "center",        
+  wrapText = TRUE,
+  fgFill = "#e34444",       # Red background
+  fontColour = "#FFFFFF"    # White font for contrast
+)
+
+# Apply the header style to the first row (column names)
+addStyle(wb, sheet = 1, style = header_style, rows = 1, cols = 1:ncol(dat_imp_merge), gridExpand = TRUE)
+
+# Adjust first row to make it wider and taller
+setRowHeights(wb, sheet = 1, rows = 1, heights = 50)  
+setColWidths(wb, sheet = 1, cols = 1:ncol(dat_imp_merge), widths = 30) 
+
+saveWorkbook(wb, "03_output/04_ANA_Clustering_Analysis/03_Clustering_Dataset.xlsx", overwrite = TRUE)
+
+
+
+
+
+
+

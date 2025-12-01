@@ -1,0 +1,139 @@
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(sf)
+library(tidyr)
+library(RColorBrewer)
+library(viridisLite)
+
+# ---- Load data ----
+pcode <- read_xlsx("01_input/02_Geographic_Datasets/sudan_pcodes.xlsx")
+adm2  <- st_read("01_input/02_Geographic_Datasets/Admin2/SDN_Admin2.shp", quiet = TRUE) %>% st_make_valid()
+ana_data <- readxl::read_xlsx("07_deep_dive/02_ANA_Qualitative_Deep_Dives/99_ANA_Flagging_Deep_Analysis.xlsx")
+
+# ---- Join shapefile with data ----
+adm2_data <- adm2 %>%
+  left_join(ana_data, by = join_by("ADM2_PCODE" == `Unit of Analysis`)) %>%
+  st_make_valid()
+
+# ---- Colors and order for deep dive decision ----
+deepdive_levels <- c("EM", "RoEM (Suspect EM)", "RoEM", "AN (Suspect RoEM)", "AN")
+deepdive_colors <- c(
+  "EM" = "#8B0000",
+  "RoEM (Suspect EM)" = "#B22222",
+  "RoEM" = "#FF4500",
+  "AN (Suspect RoEM)" = "#FFA500",
+  "AN" = "#FFD700"
+)
+
+adm2_data <- adm2_data %>%
+  mutate(`deep dive decision` = factor(`deep dive decision`, levels = deepdive_levels))
+
+# ---- Deep-Dive Decision map ----
+deepdive_plot <- ggplot(adm2_data) +
+  geom_sf(aes(fill = `deep dive decision`), color = "black", size = 0.2) +
+  scale_fill_manual(values = deepdive_colors, na.value = "#bdbdbd", drop = FALSE) +
+  labs(
+    title = "Deep Dive Decision",
+    fill = "Deep Dive Category"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+# ---- Main Driver map ----
+main_driver_levels <- sort(unique(na.omit(adm2_data$`Main driver`)))
+n_colors <- length(main_driver_levels)
+
+# Distinct, vivid, map-friendly colors
+if (n_colors <= 9) {
+  driver_palette <- c(
+    "#D73027", "#FC8D59", "#FEE08B", "#D9EF8B", "#91CF60",
+    "#1A9850", "#4575B4", "#313695", "#542788"
+  )[seq_len(n_colors)]
+} else {
+  driver_palette <- turbo(n_colors)
+}
+
+driver_colors <- setNames(driver_palette, main_driver_levels)
+
+driver_plot <- ggplot(adm2_data) +
+  geom_sf(aes(fill = `Main driver`), color = "black", size = 0.25) +
+  scale_fill_manual(values = driver_colors, na.value = "#E0E0E0") +
+  labs(
+    title = "Main Driver of Risk of Excess Mortality by Locality",
+    fill = "Main Driver"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 9),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+# ---- Export both maps in one PDF ----
+pdf("03_output/03_ANA_Result_Mapping/ANA_DeepDive_and_MainDriver_Maps.pdf",
+    width = 10, height = 8)
+print(deepdive_plot)
+print(driver_plot)
+dev.off()
+
+
+
+
+
+adm2_data <- adm2 %>%
+  left_join(ana_data, by = join_by("ADM2_PCODE" == `Unit of Analysis`)) %>%
+  mutate(main_)
+  st_make_valid()
+
+
+# ---- Main Driver map ----
+main_driver_levels <- sort(unique(na.omit(adm2_data$`Main driver`)))
+n_colors <- length(main_driver_levels)
+
+# Distinct, vivid, map-friendly colors
+if (n_colors <= 9) {
+  driver_palette <- c(
+    "#D73027", "#FC8D59", "#FEE08B", "#D9EF8B", "#91CF60",
+    "#1A9850", "#4575B4", "#313695", "#542788"
+  )[seq_len(n_colors)]
+} else {
+  driver_palette <- turbo(n_colors)
+}
+
+driver_colors <- setNames(driver_palette, main_driver_levels)
+
+driver_plot <- ggplot(adm2_data) +
+  geom_sf(aes(fill = `Main driver`), color = "black", size = 0.25) +
+  scale_fill_manual(values = driver_colors, na.value = "#E0E0E0") +
+  labs(
+    title = "Main Driver of Risk of Excess Mortality by Locality",
+    fill = "Main Driver"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    legend.position = "right",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 9),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+# ---- Export both maps in one PDF ----
+pdf("03_output/03_ANA_Result_Mapping/ANA_DeepDive_and_MainDriver_Maps.pdf",
+    width = 10, height = 8)
+print(deepdive_plot)
+print(driver_plot)
+dev.off()
+
+
+
+

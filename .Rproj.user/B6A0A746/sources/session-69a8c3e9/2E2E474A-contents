@@ -1,0 +1,1258 @@
+library(shiny)
+library(shinyjs)
+library(shinythemes)
+library(sf)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(leaflet)
+library(viridisLite)
+library(htmlwidgets)
+library(ggplot2)
+
+sf::sf_use_s2(FALSE)
+
+# --------------------------- DATA PREP ---------------------------------------
+
+# --- ADM2 SHAPEFILE (GROUND TRUTH FOR PCODES + GEOMETRY) ---------------------
+adm2 <- st_read("input/Admin2/SDN_Admin2.shp", quiet = TRUE) %>%
+  mutate(
+    ADM2_EN = case_when(
+      ADM2_EN == "Ar Rahad" & ADM1_EN == "Gedaref" ~ "Ar Rahad - Gf",
+      ADM2_EN == "Ar Rahad" & ADM1_EN == "North Kordofan" ~ "Ar Rahad - NK",
+      TRUE ~ ADM2_EN  # Keep the original value for other rows
+    )
+  )%>%
+  st_make_valid() %>%
+  st_transform(4326)
+
+# --------------------------- LONG ANA DATA (SHEET 2) -------------------------
+ana_long <- read_xlsx("input/99_ANA_Flagging_Deep_Analysis.xlsx", sheet = 2) %>%
+  mutate(
+    indicator = str_squish(indicator),
+    value     = str_squish(value)
+  )
+
+# --------------------------- MAP ATTRIBUTES FROM LONG ------------------------
+# Build deep_dive + main_driver per ADM2 from long format
+map_attrs <- ana_long %>%
+  filter(indicator %in% c("deep dive decision", "Main driver",	
+                          "deep dive decision HQ standardization")) %>%
+  mutate(
+    indicator_clean = case_when(
+      indicator == "deep dive decision" ~ "deep_dive",
+      indicator == "Main driver"        ~ "main_driver",
+      indicator == "deep dive decision HQ standardization"  ~ "deep_dive_flat",
+      TRUE                              ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(indicator_clean)) %>%
+  select(
+    ADM2_PCODE = `Administrative Level P-Code`,
+    ADM2_EN    = `Administrative Level Label`,
+    State,
+    indicator_clean,
+    value
+  ) %>%
+  distinct(ADM2_PCODE, indicator_clean, .keep_all = TRUE) %>%
+  pivot_wider(
+    names_from  = indicator_clean,
+    values_from = value
+  )
+
+# Join onto adm2 geometries
+summary_data <- adm2 %>%
+  left_join(map_attrs) %>%
+  arrange(ADM1_EN, ADM2_EN)
+
+# --------------------------- PALETTE: DEEP DIVE NUANCED -----------------------
+
+main_roem_levels <- sort(unique(na.omit(summary_data$deep_dive)))
+n_drivers_roem <- length(main_roem_levels)
+
+
+roem_deep_dive_palette <- if (n_drivers_roem <= 9) {
+  c(
+    "#FFD700",
+    "#FFA500",
+    "#8B0000",
+    "#FF4500",
+    "#B22222",
+    "#f0f7f0"
+  )[seq_len(n_drivers_roem)]
+} else {
+  turbo(n_drivers_roem )
+}
+
+driver_colors_roem <- setNames(roem_deep_dive_palette, main_roem_levels )
+
+pal_deepdive <- colorFactor(
+  palette  = driver_colors_roem,
+  domain   = main_roem_levels,
+  na.color = "#f0f0f0"
+)
+
+# --------------------------- PALETTE: DEEP DIVE FLAT --------------------------
+
+main_roem_flat_levels <- sort(unique(na.omit(summary_data$deep_dive_flat)))
+n_drivers_roem_flat <- length(main_roem_flat_levels)
+
+
+roem_palette_flat <- if (n_drivers_roem_flat <= 9) {
+  c(
+    "#FFD700",
+    "#8B0000",
+    "#FF4500"
+  )[seq_len(n_drivers_roem_flat)]
+} else {
+  turbo(n_drivers_roem_flat )
+}
+
+driver_colors_roem_flat <- setNames(roem_palette_flat, main_roem_flat_levels )
+
+pal_deepdive_flat <- colorFactor(
+  palette  = driver_colors_roem_flat,
+  domain   = main_roem_flat_levels,
+  na.color = "#f0f0f0"
+)
+
+
+# --------------------------- PALETTE: MAIN DRIVER ----------------------------
+main_driver_levels <- sort(unique(na.omit(summary_data$main_driver)))
+n_drivers <- length(main_driver_levels)
+
+driver_palette <- if (n_drivers <= 9) {
+  c(
+    "#D73027", "#FC8D59", "#FEE08B", "#D9EF8B",
+    "#91CF60", "#1A9850", "#4575B4", "#313695", "#542788"
+  )[seq_len(n_drivers)]
+} else {
+  turbo(n_drivers)
+}
+
+driver_colors <- setNames(driver_palette, main_driver_levels)
+
+pal_driver <- colorFactor(
+  palette  = driver_colors,
+  domain   = main_driver_levels,
+  na.color = "#f0f0f0"
+)
+
+
+
+
+
+# --------------------------- DONUT DATA WITHIN (FROM LONG) --------------------------
+conclusion_colors <- c(
+  "C1: Systemic Failure"          = "#FF9F9A",
+  "C2: Pockets of severity"       = "#FFE4A3",
+  "C3: Mitigation/no acute needs" = "#C9F2A3",
+  "Inconclusive"                  = "#D3D3D3"
+)
+
+deep_conclusion <- ana_long %>%
+  filter(indicator == "Conclusion") %>%
+  mutate(
+    conclusion_clean = case_when(
+      value == "C1: Systemic Failure"             ~ "C1: Systemic Failure",
+      value == "C2: Pockets of severity"          ~ "C2: Pockets of severity",
+      value %in% c("C3: Mitigation/no acute needs",
+                   "C3: Migation/no acute needs") ~ "C3: Mitigation/no acute needs",
+      value == "Inconclusive"          ~ "Inconclusive",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(conclusion_clean)) %>%
+  select(`Administrative Level Label`, conclusion = conclusion_clean)
+
+deep_shares <- deep_conclusion %>%
+  count(`Administrative Level Label`, conclusion, name = "n") %>%
+  group_by(`Administrative Level Label`) %>%
+  complete(conclusion = names(conclusion_colors), fill = list(n = 0)) %>%
+  mutate(share = n / sum(n)) %>%
+  ungroup()
+
+
+
+# --------------------------- DONUT DATA ACROSS (FROM LONG) --------------------------
+conclusion_colors2 <- c(
+  "C1: Strong Interaction"          = "#FF9F9A",
+  "C2: Limited or indirect Interaction"       = "#FFE4A3",
+  "C3: No interaction" = "#C9F2A3"
+)
+
+deep_conclusion2 <- ana_long %>%
+  filter(indicator == "Conclusion") %>%
+  mutate(
+    conclusion_clean = case_when(
+      value == "C1: Strong Interaction"             ~ "C1: Strong Interaction",
+      value == "C2: Limited or indirect Interaction"~ "C2: Limited or indirect Interaction",
+      value %in% c("C3: No interaction")            ~ "C3: No interaction",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(conclusion_clean)) %>%
+  select(`Administrative Level Label`, conclusion = conclusion_clean)
+
+deep_shares2 <- deep_conclusion2 %>%
+  count(`Administrative Level Label`, conclusion, name = "n") %>%
+  group_by(`Administrative Level Label`) %>%
+  complete(conclusion = names(conclusion_colors), fill = list(n = 0)) %>%
+  mutate(share = n / sum(n)) %>%
+  ungroup()
+
+# --------------------------- SELECTIZE CHOICES -------------------------------
+adm2_nog <- summary_data %>%
+  st_set_geometry(NULL) %>%
+  arrange(ADM1_EN, ADM2_EN)
+
+adm2_choices <- split(adm2_nog$ADM2_EN, adm2_nog$ADM1_EN)
+
+# --------------------------- CENTROIDS ---------------------------------------
+cent_sf <- st_point_on_surface(summary_data)
+cent_coords <- st_coordinates(cent_sf)
+
+summary_centroids <- data.frame(
+  ADM2_EN = summary_data$ADM2_EN,
+  lon     = cent_coords[, "X"],
+  lat     = cent_coords[, "Y"],
+  stringsAsFactors = FALSE
+)
+
+# --------------------------- NULL COALESCE -----------------------------------
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# ================================ UI ==========================================
+
+ui <- shiny::bootstrapPage(
+  shinyjs::useShinyjs(),
+  tags$head(
+    tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"),
+    tags$link(rel = "stylesheet", href = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"),
+    tags$script(HTML("
+  Shiny.addCustomMessageHandler('focusLocSelect', function(msg) {
+    var el = $('#loc_select')[0];
+    if (el && el.selectize) {
+      el.selectize.focus();
+    }
+  });
+
+  window._anaMap = window._anaMap || null;
+  window._anaConnectorCfg = window._anaConnectorCfg || null;
+
+  function anaRedrawConnector() {
+    var map = window._anaMap;
+    var cfg = window._anaConnectorCfg;
+    if (!map) return;
+
+    if (map._connectorLayer) {
+      map.removeLayer(map._connectorLayer);
+      map._connectorLayer = null;
+    }
+    if (map._connectorDot) {
+      map.removeLayer(map._connectorDot);
+      map._connectorDot = null;
+    }
+
+    if (!cfg || !cfg.active || cfg.lat === undefined || cfg.lng === undefined) return;
+
+    var panel = document.getElementById('info-panel');
+    if (!panel) return;
+
+    var mapContainer = map.getContainer();
+    var mapRect = mapContainer.getBoundingClientRect();
+    var rect = panel.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    var p0 = map.latLngToContainerPoint([cfg.lat, cfg.lng]);
+
+    var anchorX = rect.left - mapRect.left;
+    var anchorY = rect.top - mapRect.top + rect.height / 2;
+    var p3 = L.point(anchorX, anchorY);
+
+    var dx = p3.x - p0.x;
+    var dy = p3.y - p0.y;
+
+    if (Math.abs(dx) < 10) {
+      if (!map.getPane('connectorPane')) {
+        map.createPane('connectorPane');
+        var paneStraight = map.getPane('connectorPane');
+        paneStraight.style.zIndex = 650;
+        paneStraight.style.pointerEvents = 'none';
+      }
+
+      var straightCoords = [
+        map.containerPointToLatLng(p0),
+        map.containerPointToLatLng(p3)
+      ];
+
+      var straight = L.polyline(straightCoords, {
+        pane: 'connectorPane',
+        color: '#666666',
+        weight: 0.8,
+        opacity: 0.45,
+        lineJoin: 'round',
+        lineCap: 'round',
+        smoothFactor: 2
+      }).addTo(map);
+
+      var dotStraight = L.circleMarker([cfg.lat, cfg.lng], {
+        pane: 'connectorPane',
+        radius: 2.5,
+        color: '#666666',
+        weight: 0.8,
+        opacity: 0.7,
+        fillColor: '#ffffff',
+        fillOpacity: 0.9
+      }).addTo(map);
+
+      map._connectorLayer = straight;
+      map._connectorDot   = dotStraight;
+      return;
+    }
+
+    var c1 = L.point(
+      p0.x + dx * 0.33,
+      p0.y
+    );
+    var c2 = L.point(
+      p3.x - dx * 0.33,
+      p3.y
+    );
+
+    var coords = [];
+    var steps = 120;
+    for (var i = 0; i <= steps; i++) {
+      var t = i / steps;
+      var oneMinusT = 1 - t;
+
+      var x =
+        oneMinusT * oneMinusT * oneMinusT * p0.x +
+        3 * oneMinusT * oneMinusT * t * c1.x +
+        3 * oneMinusT * t * t * c2.x +
+        t * t * t * p3.x;
+
+      var y =
+        oneMinusT * oneMinusT * oneMinusT * p0.y +
+        3 * oneMinusT * oneMinusT * t * c1.y +
+        3 * oneMinusT * t * t * c2.y +
+        t * t * t * p3.y;
+
+      var latlng = map.containerPointToLatLng([x, y]);
+      coords.push(latlng);
+    }
+
+    if (!map.getPane('connectorPane')) {
+      map.createPane('connectorPane');
+      var pane = map.getPane('connectorPane');
+      pane.style.zIndex = 650;
+      pane.style.pointerEvents = 'none';
+    }
+
+    var line = L.polyline(coords, {
+      pane: 'connectorPane',
+      color: '#666666',
+      weight: 0.8,
+      opacity: 0.45,
+      lineJoin: 'round',
+      lineCap: 'round',
+      smoothFactor: 2
+    }).addTo(map);
+
+    var dot = L.circleMarker([cfg.lat, cfg.lng], {
+      pane: 'connectorPane',
+      radius: 2.5,
+      color: '#666666',
+      weight: 0.8,
+      opacity: 0.7,
+      fillColor: '#ffffff',
+      fillOpacity: 0.9
+    }).addTo(map);
+
+    map._connectorLayer = line;
+    map._connectorDot   = dot;
+  }
+
+  Shiny.addCustomMessageHandler('updateConnector', function(msg) {
+    window._anaConnectorCfg = msg;
+
+    function ensureDraw(attempts) {
+      attempts = attempts || 0;
+      if (!window._anaMap) {
+        if (attempts < 20) {
+          setTimeout(function() { ensureDraw(attempts + 1); }, 100);
+        }
+        return;
+      }
+      anaRedrawConnector();
+      if (!window._anaMap._connectorMoveHandlerAttached) {
+        window._anaMap.on('zoomend moveend', function() {
+          anaRedrawConnector();
+        });
+        window._anaMap._connectorMoveHandlerAttached = true;
+      }
+    }
+
+    ensureDraw(0);
+  });
+")),
+    tags$style(HTML("
+/* Right info panel (sidepanel) */
+#info-panel {
+  position: absolute;
+  top: 76px;
+  right: 22px;
+  width: 340px;
+  z-index: 1000;
+  margin-top: 10px;
+  height: calc(100vh - 160px);  /* Dynamic height based on screen size */
+  display: flex;
+  flex-direction: column;
+  padding-right: 8px;
+}
+
+/* Custom scrollbar styling */
+#info-panel::-webkit-scrollbar {
+  width: 4px; /* Thinner scrollbar for WebKit browsers (Chrome/Safari) */
+}
+
+#info-panel::-webkit-scrollbar-thumb {
+  background-color: #ccc;
+  border-radius: 10px;
+}
+
+#info-panel::-webkit-scrollbar-track {
+  background-color: #e0e0e0;
+  border-radius: 10px;
+}
+
+/* Panel content styling */
+#info-panel .panel {
+  padding: 10px 12px 8px 12px;
+  font-size: 12px;
+  line-height: 1.3;
+  flex-grow: 1;  /* Ensures panel grows with content */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;  /* Space between elements */
+}
+
+/* Adjusting the scrollable area */
+#info-panel .panel > div {
+  overflow-y: auto;
+  padding-right: 14px;  /* Space between content and scrollbar */
+  flex-grow: 1;
+  max-height: 100%;
+  overflow: hidden;  /* Prevent scrolling for the title */
+}
+
+/* Styling for the title (header) */
+#info-panel h4 {
+  margin-top: 0;
+  margin-bottom: 0px;
+  font-weight: 700;
+  font-size: 14px;
+  overflow: hidden;  /* Prevent title from scrolling */
+}
+
+/* Slider thumb styling */
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 20px;
+  width: 20px;
+  border-radius: 50%;
+  background: #333;
+  margin-top: -6px;  /* Adjust thumb vertical position */
+}
+
+/* Sidebar table adjustments */
+#sidebar_table {
+  margin-top: 10px;
+  margin-bottom: 20px;
+}
+
+/* Side-label styling */
+.side-label {
+  margin-top: 10px;
+  font-weight: bold;
+  font-size: 14px;
+}
+
+/* Horizontal rule styling inside panels */
+.panel hr {
+  margin: 6px 0;
+  border-color: #ccc;
+  border-width: 1px;
+}
+
+/* Body and HTML reset */
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  padding-top: 0 !important;
+}
+
+/* Full-page map shell */
+#clusterWrap {
+  position: fixed;
+  top: 50px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+#clusterWrap .leaflet-container {
+  height: 100% !important;
+  width: 100% !important;
+}
+
+/* Left control panel styling */
+#cluster-controls {
+  position: absolute;
+  top: 76px;
+  left: 22px;
+  width: 260px;
+  z-index: 1000;
+}
+
+#cluster-controls .panel {
+  padding: 10px;
+}
+
+#cluster-controls h5 {
+  margin: 8px 0 6px;
+  font-weight: 700;
+}
+
+#cluster-controls .help {
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 6px;
+}
+
+#cluster-controls .form-group {
+  margin-bottom: 8px;
+}
+
+#cluster-controls .selectize-control.single .selectize-input {
+  min-height: 30px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+#cluster-controls .selectize-dropdown {
+  font-size: 12px;
+}
+
+/* Sidebar text styling */
+.side-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.fade-state {
+  opacity: 0.6;
+  font-weight: 600;
+}
+
+.side-label {
+  font-weight: 600;
+  margin-top: 6px;
+}
+
+.side-value {
+  margin-left: 4px;
+  font-size: 12px;
+}
+"))
+  ),
+  navbarPage(
+    id="navbarPage",
+    theme = shinythemes::shinytheme("flatly"),
+    collapsible = TRUE,
+    title = div(HTML('<a style="text-decoration:none;cursor:default;color:#FFFFFF;" class="active" href="#">ANA Dashboard</a>')),
+    windowTitle = "ANA Processing Tool",
+    position = "fixed-top",
+    
+    tabPanel(
+      "Maps 🌍",
+      div(
+        id = "clusterWrap",
+        tags$head(includeCSS("styles.css")),
+        leafletOutput("map", width = "100%", height = "100%"),
+        
+        # Left controls (Updated to match right panel)
+        absolutePanel(
+          id = "cluster-controls", class = "panel panel-default",
+          fixed = TRUE, draggable = TRUE,
+          width = 270,
+          top = 76, left = 10,
+          div(
+            class = "panel",
+            style = "display: flex; flex-direction: column; gap: 8px; height: calc(100vh - 300px);",  # Same height and flex as right panel
+            
+            h5(tags$i(class = "fa fa-layer-group"), " Map"),
+            div(
+              class = "help",
+              "Select what data you want to visualize:"
+            ),
+            
+            selectInput(
+              "map_type", label = NULL,
+              choices = c(
+                "Acute Needs Analysis (Detailed)" = "deepdive",
+                "Acute Needs Analysis (Simplified)" = "flat",
+                "Main driver of Risk of Excess Mortality" = "driver"
+              ),
+              selected = "deepdive"  # Default value
+            ),
+            
+            h5(tags$i(class = "fa fa-map-marker-alt"), " Locality"),
+            
+            div(
+              class = "help",
+              "Type/Select the locality you want to highlight:"
+            ),
+            
+            selectizeInput(
+              "loc_select",
+              label    = NULL,
+              choices  = c("", adm2_choices),  # Add an empty string as the first choice
+              selected = "",  # Ensure no default selection
+              multiple = FALSE,
+              options  = list(
+                placeholder = "Please type/select Locality",  # Show "Please select Locality" as the default placeholder
+                openOnFocus = FALSE,  # Keep the dropdown closed until the user interacts
+                create = FALSE,       # Disable creating new options if not in the list (optional)
+                maxItems = 1          # Limit the selection to one item
+              )
+            ),
+            
+            # Horizontal line between header and content
+            tags$hr(style = "margin:6px 0 6px 0;"),
+            
+            # Scrollable content section (with defined height and overflow)
+            div(
+              style = "flex-grow: 1; overflow-y: auto; padding-bottom: 10px; height: calc(100vh - 300px);",  # Scrollable area for content, fixed height
+              
+              h6("Map Description", style = "font-weight: bold; margin-bottom: 15px;"),  # Title for the header
+              
+              uiOutput("map_type_text")
+              
+              # Interactive Inputs (moved here from the header section)
+             
+            )
+          )
+        ),
+        
+        # Right info panel (sidepanel) - Same characteristics as the left panel
+        shinyjs::hidden(
+          absolutePanel(
+            id = "info-panel", class = "panel panel-default",
+            fixed = TRUE, draggable = FALSE,
+            width = 340,
+            top = 76, right = 22,
+            div(
+              class = "panel",
+              style = "display: flex; flex-direction: column; gap: 8px; height: calc(100vh - 160px);",  # Same height and flex layout as left panel
+              
+              # Fixed height for header
+              tags$div(style = "margin-top: 5px;"),  # Space above the header
+              uiOutput("sidebar_header", style = "flex-shrink: 0; height: 25px; overflow: hidden;"),  # Same header size and behavior
+              
+              # Horizontal line between header and content
+              tags$hr(style = "margin:6px 0 6px 0;"),
+              
+              # Scrollable content section (with defined height and overflow)
+              div(
+                style = "flex-grow: 1; overflow-y: auto; padding-bottom: 10px; height: calc(100vh - 160px);",  # Scrollable content, same height
+                uiOutput("sidebar_table"),
+                tags$hr(style = "margin:8px 0 4px 0;"),
+                div(class = "side-label", "Within-System Results"),
+                
+                # Mini donut plots with fixed height and centered alignment
+                div(
+                  style = "flex-shrink: 0; display: flex; justify-content: center; align-items: center; margin-bottom: 10px;",
+                  plotOutput("mini_donut", height = "80px", width = "230px")
+                ),
+                
+                uiOutput("within_system_conclusions"),
+                
+                tags$hr(style = "margin:8px 0 4px 0;"),
+                div(class = "side-label", "Across-System Results:"),
+                
+                div(
+                  style = "flex-shrink: 0; display: flex; justify-content: center; align-items: center; margin-bottom: 10px;",
+                  plotOutput("mini_donut2", height = "80px", width = "230px")
+                ),
+                
+                uiOutput("across_system_conclusions")
+              )
+            )
+            ))
+      
+      
+      # # Bottom-right logo + socials
+      # div(
+      #   style = "position: fixed; bottom: 16px; right: 8px;
+      #            display: flex; flex-direction: column;
+      #            align-items: center; justify-content: flex-end; gap: 6px;",
+      #   
+      #   a(
+      #     href   = "https://www.impact-initiatives.org",
+      #     target = "_blank",
+      #     class  = "impact",
+      #     style  = "display: inline-block; margin-bottom: 70px;",
+      #     tags$img(
+      #       src   = "logo.png",
+      #       style = "width: 160px; height: auto; display: block;
+      #                transform: rotate(-90deg); transform-origin: center center;"
+      #     )
+      #   ),
+      #   
+      #   a(
+      #     href   = "https://x.com/impact_init?lang=en",
+      #     target = "_blank",
+      #     class  = "twitter",
+      #     style  = "color: black; font-size: 30px;",
+      #     HTML('<i class="fab fa-twitter"></i>')
+      #   ),
+      #   
+      #   a(
+      #     href   = "https://www.linkedin.com/company/impact-initiatives",
+      #     target = "_blank",
+      #     class  = "linkedin",
+      #     style  = "color: black; font-size: 30px;",
+      #     HTML('<i class="fab fa-linkedin"></i>')
+      #   )
+      # )
+    )
+  )
+)
+)
+
+# =============================== SERVER =======================================
+server <- function(input, output, session) {
+  
+  # Auto-focus select box once UI is ready
+  session$onFlushed(function() {
+    session$sendCustomMessage("focusLocSelect", list())
+  }, once = TRUE)
+  
+  
+  
+  ##################################### 1. LEFT SIDE PANEL #####################
+  
+    
+  output$map_type_text <- renderUI({
+    req(input$map_type)
+    
+    if (input$map_type == "deepdive") {
+      return(
+        div(
+          class = "help",
+          tags$p("This map displays data on the Risk of Excess Mortality (RoEM) based on the Acute Needs Analysis Framework (ANA). Localities are assigned to one of five levels of severity."),
+          
+          # Displaying text with bullet points using custom styling
+          tags$p(tags$strong("• Acute Needs (AN):"), " High severity gaps in key mortality drivers, which increase RoEM risk when they co-occur."),
+          tags$p(tags$strong("• AN (Suspect RoEM):"), " Severe gaps indicate high likelihood of developing RoEM in the medium to long term."),
+          tags$p(tags$strong("• Risk of Excess Mortality (RoEM):"), " Life-threatening needs are increasing the risk of mortality based on available data."),
+          tags$p(tags$strong("• RoEM (Suspect EM):"), " A situation where excess mortality is suspected but not confirmed."),
+          tags$p(tags$strong("• Excess Mortality:"), " Mortality exceeding baseline levels, expressed as number of excess deaths above 1 every 10k individuals per day.")
+        )
+      )
+    } else if (input$map_type == "flat") {
+      return(
+        div(
+          class = "help",
+          tags$p("This map displays data on the Risk of Excess Mortality (RoEM) based on the Acute Needs Analysis Framework (ANA). Localities are assigned to one of five levels of severity."),
+          
+          # Displaying text with bullet points using custom styling
+          tags$p(tags$strong("• Acute Needs (AN):"), " High severity gaps in key mortality drivers, which increase RoEM risk when they co-occur."),
+          tags$p(tags$strong("• Risk of Excess Mortality (RoEM):"), " Life-threatening needs are increasing the risk of mortality based on available data."),
+          tags$p(tags$strong("• Excess Mortality:"), " Mortality exceeding baseline levels, expressed as number of excess deaths above 1 every 10k individuals per day.")
+        )
+      )
+    } else if (input$map_type == "driver") {
+      return(
+        div(
+          class = "help",
+          tags$p("This map shows the main drivers of the Risk of Excess Mortality (RoEM) for each locality."),
+          
+          # Displaying brief descriptions for the main drivers
+          tags$p(tags$strong("• Health system:"), " Access to and functionality of healthcare and nutrition services."),
+          tags$p(tags$strong("• Food system:"), " Availability and access to food, including household food security and consumption levels."),
+          tags$p(tags$strong("• Water system:"), " Adequate water access and sanitation, ensuring clean drinking water and preventing waterborne diseases."),
+          tags$p(tags$strong("• Living conditions:"), " Housing, environmental factors, and basic amenities that affect health and well-being."),
+          tags$p(tags$strong("• Conflict:"), " Ongoing violence and instability that disrupt access to food, water, and healthcare services."),
+          tags$p(tags$strong("• Displacement:"), " Movement of populations due to conflict or environmental factors.")
+        )
+      )
+    }
+  })
+  
+  
+    
+  
+  
+  
+  ################################## 2. MAP ####################################
+  # Base leaflet
+  output$map <- renderLeaflet({
+    leaflet::leaflet(
+      options = leaflet::leafletOptions(
+        worldCopyJump      = TRUE,
+        preferCanvas       = TRUE,
+        zoomControl        = TRUE,
+        attributionControl = FALSE,
+        scrollWheelZoom    = TRUE
+      )
+    ) |>
+      leaflet::addProviderTiles(leaflet::providers$CartoDB.Positron) |>
+      leaflet::setView(lng = 30, lat = 13, zoom = 6) |>
+      htmlwidgets::onRender("
+        function(el,x){
+          var map = this;
+          if (HTMLWidgets && HTMLWidgets.find) {
+            var w = HTMLWidgets.find(el.id);
+            if (w && w.getMap) {
+              map = w.getMap();
+            }
+          }
+          window._anaMap = map;
+          if (map.zoomControl) map.zoomControl.setPosition('topright');
+        }
+      ")
+  })
+  
+  # Helper: base polygons
+  draw_base_polygons <- function(map_type) {
+    if (map_type == "deepdive") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(deep_dive),
+            "No data",
+            as.character(deep_dive)
+          )
+        )
+        
+      leafletProxy("map") %>%
+        clearGroup("base") %>%
+        clearControls() %>%
+        addPolygons(
+          data = map_dat,
+          group = "base",
+          layerId = ~ADM2_PCODE,
+          fillColor = ~pal_deepdive(deep_dive),  # Apply the color factor correctly
+          color = "#555555",
+          weight = 0.7,
+          opacity = 1,
+          fillOpacity = 0.7,
+          label = ~paste0(ADM2_EN, " — ", label_val),
+          highlightOptions = highlightOptions(
+            weight = 1.4,
+            color = "#222222",
+            opacity = 1,
+            bringToFront = TRUE
+          )
+        ) %>%
+        addLegend(
+          position = "bottomleft",
+          colors = unname(driver_colors_roem),
+          labels = names(driver_colors_roem),
+          title = "Acute Needs Categorization (5-Level)",
+          opacity = 0.9
+        )
+    }
+    else if (map_type == "driver") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(main_driver),
+            "No data",
+            as.character(main_driver)
+          )
+        )
+      
+      leafletProxy("map") %>%
+        clearGroup("base") %>%
+        clearControls() %>%
+        addPolygons(
+          data        = map_dat,
+          group       = "base",
+          layerId     = ~ADM2_PCODE,
+          fillColor   = ~pal_driver(main_driver),
+          color       = "#555555",
+          weight      = 0.7,
+          opacity     = 1,
+          fillOpacity = 0.7,
+          label       = ~paste0(ADM2_EN, " — ", label_val),
+          highlightOptions = highlightOptions(
+            weight = 1.4,
+            color  = "#222222",
+            opacity = 1,
+            bringToFront = TRUE
+          )
+        ) %>%
+        addLegend(
+          position = "bottomleft",
+          colors   = unname(driver_colors),
+          labels   = names(driver_colors),
+          title    = "Main driver of RoEM",
+          opacity  = 0.9
+        )
+    }  else if (map_type == "flat") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(deep_dive_flat),
+            "No data",
+            as.character(deep_dive_flat)
+          )
+        )
+      
+      leafletProxy("map") %>%
+        clearGroup("base") %>%
+        clearControls() %>%
+        addPolygons(
+          data        = map_dat,
+          group       = "base",
+          layerId     = ~ADM2_PCODE,
+          fillColor   = ~pal_deepdive_flat(deep_dive_flat),
+          color       = "#555555",
+          weight      = 0.7,
+          opacity     = 1,
+          fillOpacity = 0.7,
+          label       = ~paste0(ADM2_EN, " — ", label_val),
+          highlightOptions = highlightOptions(
+            weight = 1.4,
+            color  = "#222222",
+            opacity = 1,
+            bringToFront = TRUE
+          )
+        ) %>%
+        addLegend(
+          position = "bottomleft",
+          colors   = unname(driver_colors_roem_flat),
+          labels   = names(driver_colors_roem_flat),
+          title    = "Acute Needs Categorization (3-Level)",
+          opacity  = 0.9
+        )
+    } 
+  }
+  
+  # Helper: selection overlay + connector JS
+  draw_selection_overlay <- function(map_type, loc_name) {
+    leafletProxy("map") %>% clearGroup("selected")
+    
+    if (!nzchar(loc_name)) {
+      session$sendCustomMessage("updateConnector", list(active = FALSE))
+      return(invisible(NULL))
+    }
+    
+    if (map_type == "deepdive") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(deep_dive),
+            "No data",
+            as.character(deep_dive)
+          )
+        )
+      sel <- map_dat[map_dat$ADM2_EN == loc_name, , drop = FALSE]
+      if (nrow(sel) == 0) {
+        session$sendCustomMessage("updateConnector", list(active = FALSE))
+        return(invisible(NULL))
+      }
+      col <- pal_deepdive(sel$deep_dive)
+    } else if (map_type == "driver") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(main_driver),
+            "No data",
+            as.character(main_driver)
+          )
+        )
+      sel <- map_dat[map_dat$ADM2_EN == loc_name, , drop = FALSE]
+      if (nrow(sel) == 0) {
+        session$sendCustomMessage("updateConnector", list(active = FALSE))
+        return(invisible(NULL))
+      }
+      col <- pal_driver(sel$main_driver)
+    } else if (map_type == "flat") {
+      map_dat <- summary_data %>%
+        mutate(
+          label_val = if_else(
+            is.na(deep_dive_flat),
+            "No data",
+            as.character(deep_dive_flat)
+          )
+        )
+      sel <- map_dat[map_dat$ADM2_EN == loc_name, , drop = FALSE]
+      if (nrow(sel) == 0) {
+        session$sendCustomMessage("updateConnector", list(active = FALSE))
+        return(invisible(NULL))
+      }
+      col <- pal_deepdive_flat(sel$deep_dive_flat)
+    }
+    
+    leafletProxy("map") %>%
+      addPolygons(
+        data        = sel,
+        group       = "selected",
+        fillColor   = col,
+        fillOpacity = 0.9,
+        color       = "#222222",
+        weight      = 1.8,
+        opacity     = 1
+      )
+    
+    cent <- summary_centroids[summary_centroids$ADM2_EN == loc_name, , drop = FALSE]
+    if (nrow(cent) == 0) {
+      session$sendCustomMessage("updateConnector", list(active = FALSE))
+      return(invisible(NULL))
+    }
+    
+    session$sendCustomMessage(
+      "updateConnector",
+      list(
+        active = TRUE,
+        lat    = cent$lat[1],
+        lng    = cent$lon[1]
+      )
+    )
+  }
+  
+  # Base polygons when map type changes
+  observeEvent(input$map_type, {
+    mt <- input$map_type %||% "deepdive"
+    draw_base_polygons(mt)
+    draw_selection_overlay(mt, input$loc_select %||% "")
+  }, ignoreInit = FALSE)
+  
+  
+  # show/hide panel and update connector on selection change
+  observeEvent(input$loc_select, {
+    loc <- input$loc_select %||% ""
+    
+    if (nzchar(loc)) {
+      shinyjs::show("info-panel")
+    } else {
+      shinyjs::hide("info-panel")
+    }
+    
+    mt <- input$map_type %||% "deepdive"
+    draw_selection_overlay(mt, loc)
+  }, ignoreInit = TRUE)
+  
+  # Map click: update selectize
+  observeEvent(input$map_shape_click, {
+    click <- input$map_shape_click
+    req(click$id)
+    row <- adm2_nog[adm2_nog$ADM2_PCODE == click$id, ]
+    if (nrow(row) == 1) {
+      updateSelectizeInput(session, "loc_select", selected = row$ADM2_EN)
+    }
+  })
+  
+  
+  
+  #################################### 3. RIGHT SIDE PANEL #####################
+  
+  # helper: extract one indicator value for a locality
+  get_field <- function(loc, ind) {
+    out <- ana_long %>%
+      filter(`Administrative Level Label` == loc, indicator == ind) %>%
+      pull(value)
+    if (length(out) == 0) return("—")
+    out[1]
+  }
+  
+  # header: locality – State
+  output$sidebar_header <- renderUI({
+    req(input$loc_select)
+    
+    state <- ana_long %>%
+      filter(`Administrative Level Label` == input$loc_select) %>%
+      pull(State)
+    state <- ifelse(length(state) == 0, "", unique(state)[1])
+    
+    div(
+      class = "side-title",
+      paste0(input$loc_select),
+      span(
+        paste0(" – ", state),
+        class = "fade-state",
+        style = "font-size:13px;"
+      )
+    )
+  })
+  
+  # fields
+  output$sidebar_table <- renderUI({
+    req(input$loc_select)
+    
+    sev   <- get_field(input$loc_select, "Severity")
+    con   <- get_field(input$loc_select, "Conclusion")
+    cons  <- get_field(input$loc_select, "Conclusion summary")
+    plaus <- get_field(input$loc_select, "Plausibility judgement")
+    main  <- get_field(input$loc_select, "Main driver")
+    sec   <- get_field(input$loc_select, "Secondary driver")
+    
+    tagList(
+      div(class = "side-label", "Severity:"),
+      div(class = "side-value", sev),
+      
+      div(class = "side-label", "Conclusion:"),
+      div(class = "side-value", con),
+      
+      div(class = "side-label", "Conclusion summary:"),
+      div(class = "side-value", cons),
+      
+      div(class = "side-label", "Plausibility judgement:"),
+      div(class = "side-value", plaus),
+      
+      div(class = "side-label", "Main driver:"),
+      div(class = "side-value", main),
+      
+      div(class = "side-label", "Secondary driver:"),
+      div(class = "side-value", sec)
+    )
+  })
+  
+  # small donut for selected locality
+  loc_df <- reactive({
+    req(input$loc_select)
+    deep_shares %>% filter(`Administrative Level Label` == input$loc_select)
+  })
+  
+  output$mini_donut <- renderPlot({
+    df <- loc_df()
+    req(nrow(df) > 0)
+    
+    ggplot(df, aes(x = 2, y = share, fill = conclusion)) +
+      geom_col(color = "white", width = 1) +
+      coord_polar(theta = "y") +
+      xlim(0.5, 3) +
+      scale_fill_manual(values = conclusion_colors) +
+      theme_void() +
+      theme(plot.title = element_blank()) +  # Remove the title (if any)
+      guides(fill = guide_legend(title = NULL))  # Remove the legend title
+  })
+  
+  # Show list of conclusions by system
+  output$within_system_conclusions <- renderUI({
+    req(input$loc_select)
+    
+    # Filter for rows where the value starts with C1, C2, or C3 for the selected locality
+    system_conclusions <- ana_long %>%
+      filter(`Administrative Level Label` == input$loc_select,
+             indicator == "Conclusion",
+             value %in% c("C1: Systemic Failure", "C2: Pockets of severity", 
+                          "C3: Mitigation/no acute needs", "Inconclusive")) %>%
+      arrange(System) %>%  # Ensure 'System' column is referenced correctly
+      select(System, value)
+    
+    # Define conclusion colors
+    conclusion_colors <- c(
+      "C1: Systemic Failure"          = "#FF9F9A",
+      "C2: Pockets of severity"       = "#FFE4A3",
+      "C3: Mitigation/no acute needs" = "#C9F2A3",
+      "Inconclusive"                  = "#D3D3D3"
+    )
+    
+    # Create a list of outputs with colored dots and system names
+    output_list <- lapply(1:nrow(system_conclusions), function(i) {
+      system_name <- system_conclusions$System[i]
+      conclusion_value <- system_conclusions$value[i]
+      color <- conclusion_colors[conclusion_value]
+      
+      # Create a div with a colored dot and the system name
+      div(
+        style = paste("display: flex; align-items: center; margin-bottom: 5px;"),
+        span(
+          style = paste("width: 10px; height: 10px; background-color:", color, "; border-radius: 50%; margin-right: 5px;")
+        ),
+        system_name
+      )
+    })
+    
+    # Return the rendered UI elements
+    do.call(tagList, output_list)
+  })
+  
+  loc_df2 <- reactive({
+    req(input$loc_select)
+    deep_shares2 %>% filter(`Administrative Level Label` == input$loc_select)
+  })
+  
+  
+  output$mini_donut2 <- renderPlot({
+    df <- loc_df2()
+    req(nrow(df) > 0)
+    
+    ggplot(df, aes(x = 2, y = share, fill = conclusion)) +
+      geom_col(color = "white", width = 1) +
+      coord_polar(theta = "y") +
+      xlim(0.5, 3) +
+      scale_fill_manual(values = conclusion_colors2) +
+      theme_void() +
+      theme(plot.title = element_blank()) +  # Remove the title (if any)
+      guides(fill = guide_legend(title = NULL))  # Remove the legend title
+  })
+  
+  
+  
+  output$across_system_conclusions <- renderUI({
+    req(input$loc_select)
+    
+    # Filter for rows where the value starts with C1, C2, or C3 for the selected locality
+    system_conclusions <- ana_long %>%
+      filter(`Administrative Level Label` == input$loc_select,
+             indicator == "Conclusion",
+             value %in% c("C1: Strong Interaction", "C2: Limited or indirect Interaction", 
+                          "C3: No interaction")) %>%
+      arrange(System) %>%  # Ensure 'System' column is referenced correctly
+      select(System, value)
+    
+    # Define conclusion colors
+    conclusion_colors <- c(
+      "C1: Strong Interaction"          = "#FF9F9A",
+      "C2: Limited or indirect Interaction"       = "#FFE4A3",
+      "C3: No interaction" = "#C9F2A3"
+    )
+    
+    # Create a list of outputs with colored dots and system names
+    output_list <- lapply(1:nrow(system_conclusions), function(i) {
+      system_name <- system_conclusions$System[i]
+      conclusion_value <- system_conclusions$value[i]
+      color <- conclusion_colors[conclusion_value]
+      
+      # Create a div with a colored dot and the system name
+      div(
+        style = paste("display: flex; align-items: center; margin-bottom: 5px;"),
+        span(
+          style = paste("width: 10px; height: 10px; background-color:", color, "; border-radius: 50%; margin-right: 5px;")
+        ),
+        system_name
+      )
+    })
+    
+    # Return the rendered UI elements
+    do.call(tagList, output_list)
+  })
+  
+  
+  
+
+}
+
+
+shinyApp(ui, server)

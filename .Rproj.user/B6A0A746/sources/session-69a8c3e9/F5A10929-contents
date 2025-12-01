@@ -1,0 +1,441 @@
+# app.R — no-flicker UI updates: instant checkbox sync via JS, robust filter, bold borders
+
+library(shiny)
+library(shinythemes)
+library(shinyjs)
+library(sf)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(leaflet)
+library(htmltools)
+
+# ----------------------------- DATA ------------------------------------------
+adm2_raw <- st_read("input/Admin2/SDN_Admin2.shp", quiet = TRUE)
+
+adm2_3857 <- adm2_raw |>
+  st_make_valid() |>
+  st_transform(3857)
+adm2_3857_s <- st_simplify(adm2_3857, dTolerance = 150, preserveTopology = TRUE)
+adm2 <- st_transform(adm2_3857_s, 4326)
+
+adm2_boundaries <- st_as_sf(st_boundary(adm2))
+adm2_boundaries$ADM2_PCODE <- adm2$ADM2_PCODE
+adm2_boundaries$ADM2_EN    <- adm2$ADM2_EN
+adm2_boundaries$ADM1_EN    <- adm2$ADM1_EN
+
+ana_data <- read_xlsx("input/03_ANA_Flagging_Analysis.xlsx")
+
+normalize_value <- function(x) {
+  y <- x |>
+    str_replace_all("\u00A0", " ") |>
+    str_replace_all("[–—-]", "-") |>
+    str_squish() |>
+    str_to_lower()
+  dplyr::case_when(
+    str_detect(y, "risk")  & str_detect(y, "excess") & str_detect(y, "mort") ~ "Risk of Excess Mortality",
+    str_detect(y, "excess") & str_detect(y, "mort")                           ~ "Excess Mortality",
+    str_detect(y, "insuff") | str_detect(y, "probe")                          ~ "Insufficient Data/Probe with Shocks and Vulnerability",
+    str_detect(y, "acute")                                                     ~ "Acute Needs",
+    TRUE                                                                       ~ NA_character_
+  )
+}
+
+levels_vec <- c(
+  "Excess Mortality",
+  "Risk of Excess Mortality",
+  "Acute Needs",
+  "Insufficient Data/Probe with Shocks and Vulnerability"
+)
+
+summary_colors <- setNames(c("#F2B53C", "#D94A50", "#AEB4B8", "#EA724A"), levels_vec)
+
+ana_summary <- ana_data %>%
+  select(`Unit of Analysis`,
+         `Unit of Analysis Label`,
+         `SUMMARY PRELIMINARY FLAG CONCLUSION`) %>%
+  rename(
+    ADM2_PCODE_join = `Unit of Analysis`,
+    ADM2_LABEL      = `Unit of Analysis Label`,
+    SUMMARY_RAW     = `SUMMARY PRELIMINARY FLAG CONCLUSION`
+  ) %>%
+  mutate(
+    SUMMARY = normalize_value(SUMMARY_RAW),
+    SUMMARY = factor(SUMMARY, levels = levels_vec, ordered = TRUE)
+  )
+
+summary_data <- adm2 %>%
+  left_join(ana_summary, by = join_by(ADM2_PCODE == ADM2_PCODE_join))
+
+if (!"ADM2_EN" %in% names(summary_data)) {
+  summary_data$ADM2_EN <- adm2$ADM2_EN[match(summary_data$ADM2_PCODE, adm2$ADM2_PCODE)]
+}
+if (!"ADM1_EN" %in% names(summary_data)) {
+  summary_data$ADM1_EN <- adm2$ADM1_EN[match(summary_data$ADM2_PCODE, adm2$ADM2_PCODE)]
+}
+
+summary_data <- summary_data %>% arrange(SUMMARY, ADM1_EN, ADM2_EN)
+
+pal <- colorFactor(palette = unname(summary_colors), domain = levels_vec, na.color = "#bdbdbd")
+
+adm1_list <- summary_data |> st_set_geometry(NULL) |> distinct(ADM1_EN) |> arrange(ADM1_EN) |> pull(ADM1_EN)
+adm1_to_adm2 <- split(summary_data$ADM2_EN, summary_data$ADM1_EN)
+safe_id <- function(x) paste0("adm1_", gsub("[^A-Za-z0-9_]+", "_", x))
+
+# Map each ADM2 to its ADM1 (for targeted updates)
+adm2_to_adm1_tbl <- summary_data |>
+  st_set_geometry(NULL) |>
+  select(ADM2_EN, ADM1_EN) |>
+  distinct()
+adm2_to_adm1 <- setNames(adm2_to_adm1_tbl$ADM1_EN, adm2_to_adm1_tbl$ADM2_EN)
+
+# ================================ UI ==========================================
+ui <- bootstrapPage(
+  useShinyjs(),
+  tags$head(
+    tags$style(HTML("
+    body { margin-top: 50px !important; }
+    .content-wrapper { margin-top: 50px !important; }
+
+    .fixed-container {
+      position: sticky; top: 0; z-index: 9999; background-color: white;
+      padding: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+
+    .adm1-header { margin: 8px 0 4px 0; font-weight: 600; }
+    .muted { font-size: 12px; color: #666; }
+    .thin-hr { margin: 6px 0; border-top: 1px solid #eee; }
+
+    /* Filter input with LEFT bold circled × */
+    .filter-wrap { position: relative; }
+    .filter-wrap input.form-control {
+      height: 32px;
+      padding-left: 34px; padding-right: 8px;
+    }
+
+    /* Clear (×) button base */
+    .filter-clear-link {
+      position: absolute; left: 6px; top: 50%; transform: translateY(-50%);
+      width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+      border: 2px solid #666; border-radius: 50%;
+      font-weight: 700; font-size: 14px; line-height: 1;
+      color: #666; background: #fff; text-decoration: none; cursor: pointer;
+      -webkit-tap-highlight-color: transparent; user-select: none;
+    }
+    .filter-clear-link:hover { color: #222; border-color: #222; text-decoration: none; }
+
+    /* Ensure the × never turns blue/underlined in any state */
+    .filter-clear-link,
+    .filter-clear-link:link,
+    .filter-clear-link:visited,
+    .filter-clear-link:hover,
+    .filter-clear-link:active,
+    .filter-clear-link:focus {
+      color: #666 !important;
+      text-decoration: none !important;
+    }
+    .filter-clear-link:focus,
+    .filter-clear-link:active {
+      outline: none !important;
+      box-shadow: none !important;
+    }
+    /* Optional: custom accessible focus ring (remove if undesired) */
+    .filter-clear-link:focus-visible {
+      outline: 2px solid #999 !important;
+      outline-offset: 1px;
+    }
+
+    /* Hide empty groups + disable theme transitions to prevent flicker */
+    .adm1-group.hidden { display: none; }
+    #sidebar-groups, #sidebar-groups * { transition: none !important; }
+  ")),
+    # Robust client-side filter (MutationObserver) + no-rerender checkbox syncing
+    tags$script(HTML("
+      (function(){
+        // Filter helpers across Bootstrap versions
+        function getGroups(){ return document.querySelectorAll('#sidebar-groups .adm1-group'); }
+        function getRows(group){
+          return group.querySelectorAll('.shiny-options-group .form-check, .shiny-options-group .checkbox');
+        }
+        function rowText(row){
+          var inp = row.querySelector('input[type=\"checkbox\"]');
+          var txt = (inp && typeof inp.value === 'string') ? inp.value : '';
+          if(!txt){
+            var lbl = row.querySelector('.form-check-label, label');
+            txt = (lbl ? lbl.textContent : '');
+          }
+          return (txt || '').replace(/\\s+/g,' ').trim().toLowerCase();
+        }
+        function annotateGroup(group){
+          getRows(group).forEach(function(row){
+            row.dataset.name = rowText(row);
+            row.classList.add('adm2-row');
+            row.style.display = '';
+          });
+          group.classList.remove('hidden');
+        }
+        function annotateAll(){ getGroups().forEach(annotateGroup); }
+
+        function applyFilter(){
+          var qEl = document.getElementById('filter_text');
+          var q = (qEl ? qEl.value : '').trim().toLowerCase();
+          getGroups().forEach(function(group){
+            var any=false;
+            getRows(group).forEach(function(row){
+              var name = row.dataset.name || '';
+              var show = (q==='') || (name.indexOf(q)!==-1);
+              row.style.display = show ? '' : 'none';
+              if(show) any = true;
+            });
+            group.classList.toggle('hidden', !any);
+          });
+        }
+        function debounce(fn, wait){ var t; return function(){ clearTimeout(t); var a=arguments,c=this; t=setTimeout(function(){ fn.apply(c,a); }, wait||80);} }
+        var applyFilterDebounced = debounce(applyFilter, 80);
+
+        // Observe DOM changes in the sidebar (e.g., when a group re-renders)
+        var sidebar = null, observer = null;
+        function ensureObserver(){
+          if(!sidebar){ sidebar = document.getElementById('sidebar-groups'); }
+          if(sidebar && !observer){
+            observer = new MutationObserver(function(){
+              var st = sidebar.scrollTop;
+              annotateAll(); applyFilterDebounced();
+              sidebar.scrollTop = st;
+            });
+            observer.observe(sidebar, { childList:true, subtree:true });
+          }
+        }
+
+        // ---- New: custom message to set group values WITHOUT re-render ----
+        Shiny.addCustomMessageHandler('setGroupValues', function(msg){
+          // msg: {id: 'adm1_<...>', values: ['loc A','loc B', ...]}
+          var group = document.getElementById(msg.id);
+          if(!group) return;
+          var set = new Set(msg.values || []);
+          var boxes = group.querySelectorAll('.shiny-options-group input[type=\"checkbox\"]');
+          boxes.forEach(function(inp){
+            var should = set.has(inp.value || '');
+            if (inp.checked !== should) inp.checked = should;
+          });
+          // Update Shiny's input value for this group (no DOM rebuild)
+          Shiny.setInputValue(msg.id, Array.from(set), {priority:'event'});
+        });
+
+        // Boot + events
+        document.addEventListener('DOMContentLoaded', function(){
+          ensureObserver();
+          setTimeout(function(){ annotateAll(); applyFilter(); }, 300);
+        });
+        document.addEventListener('input', function(e){
+          if(e.target && e.target.id === 'filter_text'){ applyFilterDebounced(); }
+        });
+        document.addEventListener('click', function(e){
+          if(e.target && e.target.id === 'filter_clear'){
+            var el = document.getElementById('filter_text');
+            if(el){ el.value=''; applyFilter(); }
+          }
+        });
+        document.addEventListener('shiny:value', function(e){
+          if(e.detail && e.detail.name === 'adm1_groups'){
+            ensureObserver();
+            setTimeout(function(){ annotateAll(); applyFilter(); }, 0);
+          }
+        });
+      })();
+    "))
+  ),
+  navbarPage(
+    id = "navbarPage",
+    theme = shinytheme("flatly"),
+    collapsible = TRUE,
+    title = div(HTML('<a style="text-decoration:none;cursor:default;color:#FFFFFF;" class="active" href="#">ANA Dashboard</a>')),
+    windowTitle = "ANA Processing Tool",
+    position = "fixed-top",
+    tabPanel("Map",
+             div(class="content-wrapper",
+                 fluidRow(
+                   column(3,
+                          div(class="fixed-container",
+                              h4(tags$i(class="fa fa-filter"), " Select Areas"),
+                              div(class="filter-wrap mb-2",
+                                  actionLink("filter_clear", label=HTML("&times;"), class="filter-clear-link", title="Clear filter"),
+                                  textInput("filter_text", label=NULL, placeholder="Filter localities…")
+                              ),
+                              div(class="muted", "Filter hides non-matching boxes only. Your selection persists."),
+                              div(id="sidebar-groups", style="max-height:66vh; overflow:auto; padding-right:6px;",
+                                  uiOutput("adm1_groups")),
+                              br(),
+                              actionButton("clear_sel", label="Clear selection", icon=icon("ban"), class="btn btn-default")
+                          )
+                   ),
+                   column(9, leafletOutput("map", height="85vh"))
+                 )
+             )
+    )
+  )
+)
+
+# =============================== SERVER =======================================
+server <- function(input, output, session) {
+  `%||%` <- function(a, b) if (!is.null(a)) a else b
+  
+  selected_names <- reactiveVal(character(0))
+  lock_count     <- reactiveVal(0)
+  lock   <- function() lock_count(lock_count() + 1)
+  unlock <- function() { lc <- lock_count(); lock_count(if (lc > 0) lc - 1 else 0) }
+  
+  # Build all checkbox groups once (static UI)
+  output$adm1_groups <- renderUI({
+    tagList(lapply(adm1_list, function(a1) {
+      inputId <- safe_id(a1)
+      choices <- sort(unique(adm1_to_adm2[[a1]]))
+      div(class="adm1-group",
+          div(class="adm1-header", a1),
+          checkboxGroupInput(inputId, label=NULL, choices=choices, selected=character(0), inline=FALSE),
+          tags$hr(class="thin-hr")
+      )
+    }))
+  })
+  
+  # Collate checked values across groups (still drives reactivity)
+  get_all_checked <- reactive({
+    ids <- safe_id(adm1_list)
+    unique(unlist(lapply(ids, function(id) input[[id]]), use.names=FALSE))
+  })
+  visible_checked <- debounce(get_all_checked, 100)
+  
+  # Reflect manual checkbox changes into canonical selection
+  observe({
+    if (lock_count() > 0) return()
+    vc <- visible_checked()
+    prev <- selected_names()
+    to_remove <- setdiff(prev, vc)
+    new_sel <- union(setdiff(prev, to_remove), vc)
+    if (!identical(prev, new_sel)) {
+      selected_names(new_sel)
+      draw_selection(new_sel)
+    }
+  })
+  
+  # Clear all — do it with JS (no re-render)
+  observeEvent(input$clear_sel, {
+    lock(); on.exit(unlock(), add=TRUE)
+    selected_names(character(0))
+    # send empty values per group (fast, no flicker)
+    for (a1 in adm1_list) {
+      session$sendCustomMessage("setGroupValues", list(id = safe_id(a1), values = list()))
+    }
+    leafletProxy("map") |> clearGroup("selected_polys") |> clearGroup("selected_outline")
+  })
+  
+  # ----------------------------- MAP -----------------------------------------
+  output$map <- renderLeaflet({
+    leaflet(options=leafletOptions(preferCanvas=TRUE)) |>
+      addMapPane("base", zIndex=410) |>
+      addMapPane("selectedPane", zIndex=420) |>
+      addTiles(options=providerTileOptions(updateWhenIdle=TRUE)) |>
+      # --- EXACTLY AS REQUESTED ---
+      addPolygons(
+        data=summary_data,
+        layerId=~ADM2_PCODE,
+        fillColor=~pal(SUMMARY),
+        color="#444444", weight=0.5, opacity=1,
+        fillOpacity=0.8,
+        label=~htmlEscape(
+          paste0(ADM2_EN, " — ",
+                 ifelse(is.na(SUMMARY), "No data", as.character(SUMMARY)))
+        ),
+        options=pathOptions(pane="base", clickable=TRUE),
+        group="ADM2"
+      ) |>
+      addLegend("bottomright",
+                colors=unname(summary_colors),
+                labels=names(summary_colors),
+                title="SUMMARY PRELIMINARY FLAG CONCLUSION",
+                opacity=0.9
+      )
+  })
+  
+  # Warm-up empty overlay groups
+  observeEvent(input$map_bounds, {
+    if (!isTRUE(session$userData$warm_done)) {
+      session$userData$warm_done <- TRUE
+      leafletProxy("map") |>
+        addPolygons(data=summary_data[0,], fill=FALSE, color="white", weight=2,
+                    options=pathOptions(pane="selectedPane"), group="selected_polys") |>
+        addPolylines(data=adm2_boundaries[0,], color="black", weight=2.5,
+                     options=pathOptions(pane="selectedPane"), group="selected_outline")
+    }
+  }, once=TRUE)
+  
+  # --- Incremental overlays with bold borders (no flicker) ---
+  active_localities <- reactiveVal(character(0))
+  draw_selection <- function(nms) {
+    prev <- active_localities()
+    added <- setdiff(nms, prev)
+    removed <- setdiff(prev, nms)
+    active_localities(nms)
+    if (length(added)==0 && length(removed)==0) return(invisible())
+    
+    lp <- leafletProxy("map")
+    
+    if (length(removed)>0) {
+      for (loc in removed) {
+        leaflet::removeShape(lp, paste0("poly_", loc))
+        leaflet::removeShape(lp, paste0("bnd_",  loc))
+      }
+    }
+    
+    if (length(added)>0) {
+      sel_poly <- summary_data |> dplyr::filter(ADM2_EN %in% added)
+      sel_bnd  <- adm2_boundaries |> dplyr::filter(ADM2_EN %in% added)
+      if (nrow(sel_poly)>0) {
+        lp <- lp |> addPolygons(
+          data=sel_poly, layerId=paste0("poly_", sel_poly$ADM2_EN),
+          fill=FALSE, color="#FFFFFF", weight=2, opacity=1,
+          options=pathOptions(pane="selectedPane"), group="selected_polys")
+      }
+      if (nrow(sel_bnd)>0) {
+        lp |> addPolylines(
+          data=sel_bnd, layerId=paste0("bnd_", sel_bnd$ADM2_EN),
+          color="#000000", weight=2.5, opacity=1, dashArray="3,3",
+          options=pathOptions(pane="selectedPane"), group="selected_outline")
+      }
+    }
+  }
+  
+  # Targeted group update via JS (no DOM rebuild → no flash)
+  set_group_values <- function(adm1_name, values_vec) {
+    session$sendCustomMessage("setGroupValues", list(id = safe_id(adm1_name), values = as.list(values_vec)))
+  }
+  
+  # Map click: toggle selection and update ONLY that ADM1 group (via JS)
+  observeEvent(input$map_shape_click, {
+    click <- input$map_shape_click
+    req(click$id)
+    row <- summary_data |> dplyr::filter(ADM2_PCODE == click$id) |> dplyr::slice(1)
+    req(nrow(row) == 1)
+    nm  <- row$ADM2_EN
+    a1  <- unname(adm2_to_adm1[[nm]])
+    
+    cur <- selected_names()
+    if (nm %in% cur) cur <- setdiff(cur, nm) else cur <- c(cur, nm)
+    selected_names(cur)
+    
+    lock(); on.exit(unlock(), add=TRUE)
+    # Determine the selected values in this specific ADM1 group and update via JS
+    choices <- sort(unique(adm1_to_adm2[[a1]]))
+    sel_this <- intersect(choices, cur)
+    set_group_values(a1, sel_this)   # no re-render, instant UI update
+    draw_selection(cur)
+  })
+  
+  
+  
+  
+}
+
+shinyApp(ui, server)
+
